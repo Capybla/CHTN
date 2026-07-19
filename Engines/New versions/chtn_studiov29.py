@@ -4,6 +4,7 @@ import threading
 import queue
 import time
 import subprocess
+import json
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -101,7 +102,6 @@ def abrir_audio_universal(ruta, target_sr=SAMPLE_RATE):
     pipes y flujos directos desde FFmpeg sin crear archivos temporales.
     Acepta cualquier formato multimedia y preserva todos los canales (Estéreo, 5.1, 7.1).
     """
-    # 1. Comprobar si FFmpeg está accesible en el sistema
     try:
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     except Exception:
@@ -110,7 +110,6 @@ def abrir_audio_universal(ruta, target_sr=SAMPLE_RATE):
             "Por favor, instala FFmpeg para poder codificar audio y vídeo universalmente."
         )
 
-    # 2. Consultar número de canales mediante ffprobe
     cmd_probe = [
         "ffprobe", "-v", "error", "-select_streams", "a:0",
         "-show_entries", "stream=channels", "-of", "csv=p=0", ruta
@@ -119,9 +118,8 @@ def abrir_audio_universal(ruta, target_sr=SAMPLE_RATE):
         res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True)
         canales = int(res.stdout.strip())
     except Exception:
-        canales = 2  # Fallback a estéreo si falla la interrogación por metadatos
+        canales = 2  
 
-    # 3. Lanzar FFmpeg para decodificar a PCM Float de 32 bits a la frecuencia objetivo
     cmd_decode = [
         "ffmpeg", "-v", "error", "-i", ruta,
         "-f", "f32le", "-acodec", "pcm_f32le", "-ar", str(target_sr), "-"
@@ -133,9 +131,7 @@ def abrir_audio_universal(ruta, target_sr=SAMPLE_RATE):
     if proceso.returncode != 0 or len(raw_data) == 0:
         raise ValueError("FFmpeg no pudo extraer o decodificar flujo de audio del contenedor multimedia especificado.")
 
-    # 4. Formatear y moldear el búfer de muestras a un array bidimensional contiguo de NumPy
     data_pcm = np.frombuffer(raw_data, dtype=np.float32)
-    # Re-dimensionar basándonos en los canales de entrada del archivo
     data_pcm = data_pcm.reshape(-1, canales).T
 
     return data_pcm, target_sr
@@ -146,12 +142,207 @@ def abrir_audio_universal(ruta, target_sr=SAMPLE_RATE):
 class ChtnStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("CHTN Studio v31 Pro - Advanced Spectral DAW")
-        self.root.geometry("1200x820")  
-        self.root.minsize(1050, 720)
+        
+        # ---------------------------------------------------------
+        # 0. SISTEMA DE INTERNACIONALIZACIÓN (i18n) & AJUSTES
+        # ---------------------------------------------------------
+        self.current_lang = "en"
+        self.translations = {}
+        self.lang_flags = {
+            "en": "🇬🇧",
+            "es": "🇪🇸",
+            "fr": "🇫🇷",
+            "ja": "🇯🇵",
+            "de": "🇩🇪",
+            "it": "🇮🇹",
+            "ru": "🇷🇺"
+        }
+        
+        # Diccionarios nativos de respaldo para garantizar un arranque inmune a caídas
+        self.english_fallback_data = {
+            "_language": "English",
+            "_code": "en",
+            "_version": 31,
+            "app_title": "CHTN Studio v31 Pro - Advanced Spectral DAW",
+            "encoder_title": " SPECTRUM MASTERING & ENCODING STATION (SINUSOIDAL TRACKER) ",
+            "btn_load_pcm": "1. Load Track (Audio or Video)",
+            "btn_save_chtn": "2. Destination .CHTN",
+            "lbl_poles": "Total Oscillators:",
+            "lbl_res_msg": "Tracker: {t} pure harmonics + {n} noise banks.",
+            "chk_autoload": "Auto-load upon conversion",
+            "btn_convert": "Compile CHTN v31 (Mu-law + Zero-Padding)",
+            "decoder_title": " ADDITIVE SYNTHESIS ENGINE (MULTITHREAD DAW) ",
+            "lbl_gain": "Gain:",
+            "lbl_smooth": "Temporal Smoothing:",
+            "lbl_stereo": "Stereo Width:",
+            "btn_load_chtn": "Open .CHTN",
+            "btn_play": "PLAY ⏸",
+            "btn_stop": "STOP 🛑",
+            "diag_title": " DIAGNOSTICS & SYSTEM TELEMETRY PANEL ",
+            "lbl_vis_selector": "Laboratory Measurement Instrument:",
+            "chk_vis": "Enable Spectrum Visualizer Render",
+            "chk_debug": "Print DSP Thread Trace in Terminal",
+            "lbl_sys_stats": "SYSTEM TELEMETRY (REAL-TIME READINGS):",
+            "stats_wait": "Awaiting audio stream initialization...",
+            "status_ready": "Ready.",
+            "no_file_selected": "No file selected",
+            "no_dest_selected": "No destination .chtn chosen",
+            "no_container_loaded": "No container loaded",
+            "status_convert_ffmpeg": "Opening and decoding stream using FFmpeg...",
+            "status_convert_stft": "Running STFT with Blackman-Harris and Zero-Padding (Extreme Resolution)...",
+            "status_convert_tracking": "Active Sinusoidal Tracking: Pitch trajectory matching...",
+            "status_convert_mulaw": "Mu-Law Quantization & Delta Event Compression...",
+            "status_convert_write": "Writing compressed CHTN container...",
+            "convert_done_msg": "Completed! Final Size: {sz:.1f} KB.",
+            "convert_success_title": "CHTN Studio v31",
+            "convert_success_msg": "High-Fidelity encoding completed!\nOptimal file size: {sz:.1f} KB.",
+            "err_ffmpeg_title": "FFmpeg Required",
+            "err_media_title": "Multimedia Error",
+            "err_media_msg": "Could not process file: {ex}",
+            "err_read_title": "Reading Error",
+            "status_decoding": "Decoding container under spec CHTN v{version}...",
+            "status_dec_done": "Spectral CHTN container successfully loaded to RAM.",
+            "status_play_daw": "DSP DAW Engine active and playing.",
+            "status_play_stop": "DSP Engine stopped.",
+            "elapsed_duration": "Duration: {h:02d}:{m:02d}",
+            "total_duration_lbl": "Total Duration: --:--",
+            "stats_wait_play": "Start playback to monitor real-time DSP data...",
+            "vis_fft_log": "Logarithmic FFT Analyzer",
+            "vis_fft_bar": "FFT Bar Spectrometer",
+            "vis_spectrogram": "2D Sonogram (Spectrogram)",
+            "vis_waterfall": "3D Spectral Waterfall",
+            "vis_lissajous": "Vector Monitor (Lissajous)",
+            "vis_correlation": "Correlation Goniometer",
+            "vis_oscilloscope_dual": "Dual L/R Oscilloscope",
+            "vis_oscilloscope_scroll": "Multi-Osciloscopio (Scroll)",
+            "vis_vu_meter": "Analog VU Meter",
+            "vis_peak_digital": "RMS / Digital Peak Meter",
+            "vis_bark": "Bark Psychoacoustic Scale",
+            "vis_activity": "Oscillator Activity Tracker",
+            "menu_file": "File",
+            "menu_settings": "Settings",
+            "menu_language": "Language",
+            "menu_exit": "Exit",
+            "stat_engine": "CHTN DECODER ENGINE v31",
+            "stat_version": "Format Version : {ver}",
+            "stat_sr": "WAV SampleRate : {sr} Hz",
+            "stat_tonal": "Tonal Channels : {ton}",
+            "stat_noise": "Noise Channels : {noi}",
+            "stat_file_sz": "CHTN File Size : {sz:.2f} KB",
+            "stat_reduction": "Reduction Ratio: {red:.2f} %",
+            "stat_active_rt": "Active Oscs RT : {oscs}",
+            "stat_dsp_load": "DSP Thread Load: {load:.1f} %",
+            "stat_dsp_fps": "DSP Frame Rate : {fps:.1f} FPS",
+            "stat_block_ms": "Block Render   : {ms:.2f} ms",
+            "stat_stage_title": "DSP STAGE PROFILE (ms):",
+            "stat_stage_prep": " - Prep Frame  : {val:.3f}",
+            "stat_stage_syn": " - Additive Syn: {val:.3f}",
+            "stat_stage_mix": " - Mix & Limit : {val:.3f}",
+            "stat_stage_vis": " - Visual Data : {val:.3f}"
+        }
+
+        self.spanish_data = {
+            "_language": "Español",
+            "_code": "es",
+            "_version": 31,
+            "app_title": "CHTN Studio v31 Pro - Advanced Spectral DAW",
+            "encoder_title": " UNIDAD DE MASTERING Y ENCODER (TRACKING SINUSOIDAL) ",
+            "btn_load_pcm": "1. Cargar Pista (Audio o Vídeo)",
+            "btn_save_chtn": "2. Destino .CHTN",
+            "lbl_poles": "Osciladores Totales:",
+            "lbl_res_msg": "Tracker: {t} armónicos puros + {n} bancos de ruido.",
+            "chk_autoload": "Auto-cargar al finalizar",
+            "btn_convert": "Compilar CHTN v31 (Mu-law + Zero-Padding)",
+            "decoder_title": " MOTOR DE SÍNTESIS ADITIVA (DAW MULTIHILO) ",
+            "lbl_gain": "Ganancia:",
+            "lbl_smooth": "Suavizado Temporal:",
+            "lbl_stereo": "Ancho Estéreo:",
+            "btn_load_chtn": "Abrir .CHTN",
+            "btn_play": "PLAY ⏸",
+            "btn_stop": "STOP 🛑",
+            "diag_title": " PANEL DE CONTROL DE DIAGNÓSTICO Y TELEMETRÍA ",
+            "lbl_vis_selector": "Instrumento de Medición de Laboratorio:",
+            "chk_vis": "Habilitar Visualizador de Espectro",
+            "chk_debug": "Imprimir Trace de Hilo DSP en Consola",
+            "lbl_sys_stats": "TELEMETRÍA DEL SISTEMA (LECTURAS EN TIEMPO REAL):",
+            "stats_wait": "Esperando inicialización del flujo de audio...",
+            "status_ready": "Listo.",
+            "no_file_selected": "Ningún archivo seleccionado",
+            "no_dest_selected": "Ningún destino .chtn elegido",
+            "no_container_loaded": "Ningún contenedor cargado",
+            "status_convert_ffmpeg": "Abriendo y decodificando flujo mediante FFmpeg...",
+            "status_convert_stft": "Ejecutando STFT con Blackman-Harris y Zero-Padding (Extrema Resolución)...",
+            "status_convert_tracking": "Active Sinusoidal Tracking: Emparejamiento de trayectorias de pitch...",
+            "status_convert_mulaw": "Cuantización Mu-Law y Compresión Delta de Eventos...",
+            "status_convert_write": "Escribiendo contenedor comprimido CHTN...",
+            "convert_done_msg": "¡Completado! Peso final: {sz:.1f} KB.",
+            "convert_success_title": "CHTN Studio v31",
+            "convert_success_msg": "¡Codificación finalizada de Alta Fidelidad!\nTamaño final óptimo: {sz:.1f} KB.",
+            "err_ffmpeg_title": "FFmpeg Requerido",
+            "err_media_title": "Error multimedia",
+            "err_media_msg": "No se pudo procesar el archivo: {ex}",
+            "err_read_title": "Error de lectura",
+            "status_decoding": "Decodificando contenedor bajo especificación CHTN v{version}...",
+            "status_dec_done": "Contenedor Espectral CHTN cargado correctamente en RAM.",
+            "status_play_daw": "Motor DSP DAW activo y reproduciendo.",
+            "status_play_stop": "Motor DSP detenido.",
+            "elapsed_duration": "Duración: {h:02d}:{m:02d}",
+            "total_duration_lbl": "Duración Total: --:--",
+            "stats_wait_play": "Inicie la reproducción para monitorizar datos del DSP...",
+            "vis_fft_log": "Analizador FFT Logarítmico",
+            "vis_fft_bar": "Espectrómetro de Barras (FFT)",
+            "vis_spectrogram": "Sonograma 2D (Espectrograma)",
+            "vis_waterfall": "Cascada Espectral 3D",
+            "vis_lissajous": "Monitor Vectorial (Lissajous)",
+            "vis_correlation": "Goniometro de Correlación",
+            "vis_oscilloscope_dual": "Osciloscopio Dual L/R",
+            "vis_oscilloscope_scroll": "Multi-Osciloscopio (Scroll)",
+            "vis_vu_meter": "Vúmetro Analógico (VU Meter)",
+            "vis_peak_digital": "Medidor RMS / Peak Digital",
+            "vis_bark": "Escala Psicoacústica Bark",
+            "vis_activity": "Actividad de Osciladores",
+            "menu_file": "Archivo",
+            "menu_settings": "Configuración",
+            "menu_language": "Idioma",
+            "menu_exit": "Salir",
+            "stat_engine": "MOTOR DE DECODIFICACIÓN CHTN v31",
+            "stat_version": "Versión del formato: {ver}",
+            "stat_sr": "Tasa de Muestreo WAV: {sr} Hz",
+            "stat_tonal": "Canales Tonales   : {ton}",
+            "stat_noise": "Canales de Ruido  : {noi}",
+            "stat_file_sz": "Tamaño del CHTN   : {sz:.2f} KB",
+            "stat_reduction": "Tasa de Compresión: {red:.2f} %",
+            "stat_active_rt": "Osciladores Activos: {oscs}",
+            "stat_dsp_load": "Carga del hilo DSP : {load:.1f} %",
+            "stat_dsp_fps": "Tasa de frames DSP : {fps:.1f} FPS",
+            "stat_block_ms": "Renderizado Bloque : {ms:.2f} ms",
+            "stat_stage_title": "TIEMPOS DE ETAPAS DSP (ms):",
+            "stat_stage_prep": " - Prep. Frame    : {val:.3f}",
+            "stat_stage_syn": " - Síntesis Adit. : {val:.3f}",
+            "stat_stage_mix": " - Mezcla y Limit.: {val:.3f}",
+            "stat_stage_vis": " - Datos Visores  : {val:.3f}"
+        }
+
+        self._setup_i18n()
+
+        # Mapeo inmutable para los visualizadores espectrales y de fase
+        self.visualizadores_mapping = [
+            ("vis_fft_log", "Analizador FFT Logarítmico"),
+            ("vis_fft_bar", "Espectrómetro de Barras (FFT)"),
+            ("vis_spectrogram", "Sonograma 2D (Espectrograma)"),
+            ("vis_waterfall", "Cascada Espectral 3D"),
+            ("vis_lissajous", "Monitor Vectorial (Lissajous)"),
+            ("vis_correlation", "Goniometro de Correlación"),
+            ("vis_oscilloscope_dual", "Osciloscopio Dual L/R"),
+            ("vis_oscilloscope_scroll", "Multi-Osciloscopio (Scroll)"),
+            ("vis_vu_meter", "Vúmetro Analógico (VU Meter)"),
+            ("vis_peak_digital", "Medidor RMS / Peak Digital"),
+            ("vis_bark", "Escala Psicoacústica Bark"),
+            ("vis_activity", "Actividad de Osciladores")
+        ]
 
         # ---------------------------------------------------------
-        # 1. INICIALIZACIÓN PREVENTIVA DE TODAS LAS VARIABLES (Evita AttributeError)
+        # 2. INICIALIZACIÓN PREVENTIVA DE TODAS LAS VARIABLES (Evita AttributeError)
         # ---------------------------------------------------------
         self.block_render_ms = 0.0
         self.prep_frame_ms = 0.0
@@ -173,7 +364,7 @@ class ChtnStudioApp:
         self.prof_vis = 0.0
         
         # ---------------------------------------------------------
-        # 2. ESTADO DE AUDIO Y DOBLE BUFFER POR ANILLO CONTIGUO (RING BUFFER)
+        # 3. ESTADO DE AUDIO Y DOBLE BUFFER POR ANILLO CONTIGUO (RING BUFFER)
         # ---------------------------------------------------------
         self.stream = None
         self.reproduciendo = False
@@ -219,7 +410,7 @@ class ChtnStudioApp:
         self.t_smooth_mat = 3.0 * (self.t_matrix ** 2) - 2.0 * (self.t_matrix ** 3)
         
         # ---------------------------------------------------------
-        # 3. BANCOS DE RUIDO ESPECTRAL DEDICADOS
+        # 4. BANCOS DE RUIDO ESPECTRAL DEDICADOS
         # ---------------------------------------------------------
         self.NOISE_LOOKUP_SIZE = SAMPLE_RATE * 3  
         self.noise_bands_lookup = np.zeros((MAX_NOISE_BANDS, self.NOISE_LOOKUP_SIZE), dtype=np.float32)
@@ -235,24 +426,235 @@ class ChtnStudioApp:
         self.num_canales_slider_var = tk.IntVar(value=384) 
         self.master_tonal_gain_var = tk.DoubleVar(value=1.0)  
         self.stereo_width_var = tk.DoubleVar(value=1.0)       
+        self.temporal_smooth_var = tk.DoubleVar(value=0.45)   
         
         self.visualizer_enabled = tk.BooleanVar(value=True)
         self.dsp_debug_enabled = tk.BooleanVar(value=True)  
-        self.visualizer_mode_var = tk.StringVar(value="Analizador FFT Logarítmico")
+        self.visualizer_mode_var = tk.StringVar()  # Seteado dinámicamente en actualizar_idioma_ui
         self.auto_load_after_convert = tk.BooleanVar(value=True)
         self.progress_var = tk.DoubleVar(value=0)
         
-        self.selected_mp3_path = tk.StringVar(value="Ningún archivo seleccionado")
-        self.output_chtn_path = tk.StringVar(value="Ningún destino .chtn elegido")
-        self.loaded_chtn_path = tk.StringVar(value="Ningún contenedor cargado")
+        self.selected_mp3_path = tk.StringVar()
+        self.output_chtn_path = tk.StringVar()
+        self.loaded_chtn_path = tk.StringVar()
         self.tiempo_transcurrido_lbl = tk.StringVar(value="00:00")
         self.tiempo_restante_lbl = tk.StringVar(value="00:00")
-        self.tiempo_total_lbl = tk.StringVar(value="Duración Total: --:--")
+        self.tiempo_total_lbl = tk.StringVar()
 
         self._configurar_estetica_retro()
         self._crear_ui()
+        self.actualizar_idioma_ui()
         self._actualizar_info_canales_encoder()
         self.root.after(100, self._programar_visualizador)
+
+    # =========================================================================
+    # GESTOR DE IDIOMAS v31 (i18n & SETTINGS PERSISTENTES)
+    # =========================================================================
+    def _setup_i18n(self):
+        """Crea el directorio 'languages' y escribe los archivos de traducción si no existen."""
+        languages_dir = "languages"
+        if not os.path.exists(languages_dir):
+            try:
+                os.makedirs(languages_dir)
+            except Exception:
+                pass
+        
+        # Volcado inicial transparente de diccionarios por defecto
+        for lang_code, data in [("en", self.english_fallback_data), ("es", self.spanish_data)]:
+            filepath = os.path.join(languages_dir, f"{lang_code}.json")
+            if not os.path.exists(filepath):
+                try:
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+                except Exception:
+                    pass
+
+        # Cargar y escanear todos los JSON presentes en el directorio
+        self.translations = {}
+        try:
+            for file in os.listdir(languages_dir):
+                if file.endswith(".json"):
+                    lang_key = file[:-5]
+                    filepath = os.path.join(languages_dir, file)
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        loaded_data = json.load(f)
+                        
+                        # Fase 5: Validación profunda del archivo cargado (Mismos campos, misma versión)
+                        missing_keys = []
+                        for k in self.english_fallback_data.keys():
+                            if k not in loaded_data:
+                                missing_keys.append(k)
+                        
+                        # Fase 2: Control de versión de idiomas
+                        file_ver = loaded_data.get("_version", 0)
+                        if file_ver < 31:
+                            print(f"[LANG] {file} is outdated (v{file_ver} < v31). Using English fallback for missing keys.")
+                        
+                        if missing_keys:
+                            print(f"[LANG] Missing {len(missing_keys)} keys in {file}. Using English fallback.")
+                            # Inyección directa de fallbacks ingleses para evitar excepciones silenciosas
+                            for k in missing_keys:
+                                loaded_data[k] = self.english_fallback_data[k]
+
+                        self.translations[lang_key] = loaded_data
+        except Exception as e:
+            print(f"[LANG] Error reading translation files: {e}")
+        
+        # En caso de fallas de lectura críticas de disco, inyectamos los fallbacks en memoria
+        if "en" not in self.translations: self.translations["en"] = self.english_fallback_data
+        if "es" not in self.translations: self.translations["es"] = self.spanish_data
+
+        # Carga de Settings Persistentes
+        self.current_lang = "en"
+        settings_path = "settings.json"
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    settings = json.load(f)
+                    self.current_lang = settings.get("language", "en")
+            except Exception:
+                pass
+        
+        # Si el idioma preferido no está cargado, caemos a inglés
+        if self.current_lang not in self.translations:
+            self.current_lang = "en"
+
+    def tr(self, key, **kwargs):
+        """Función de traducción universal con fallback integrado al diccionario inglés."""
+        val = self.translations.get(self.current_lang, {}).get(key, self.translations.get("en", {}).get(key, key))
+        if kwargs:
+            try:
+                return val.format(**kwargs)
+            except Exception:
+                return val
+        return val
+
+    def change_language(self, lang_code):
+        """Cambia el idioma activo de forma síncrona, guarda en settings.json y refresca la UI."""
+        if lang_code in self.translations:
+            self.current_lang = lang_code
+            self.actualizar_idioma_ui()
+            
+            # Persistencia de ajustes en disco
+            try:
+                with open("settings.json", "w", encoding="utf-8") as f:
+                    json.dump({"language": lang_code}, f, ensure_ascii=False, indent=4)
+            except Exception as e:
+                print(f"[SETTINGS] Could not write config file: {e}")
+
+    def _crear_menus(self):
+        """Reconstruye y enlaza la barra de menús usando la API oficial y limpia de Tkinter."""
+        self.root.config(menu="")
+        
+        self.menubar = tk.Menu(self.root)
+        
+        # Menú File
+        self.file_menu = tk.Menu(self.menubar, tearoff=0)
+        self.file_menu.add_command(label=self.tr("btn_load_chtn"), command=self.cargar_chtn)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label=self.tr("menu_exit"), command=self.detener_audio)
+        self.menubar.add_cascade(menu=self.file_menu, label=self.tr("menu_file"))
+        
+        # Menú Settings
+        self.settings_menu = tk.Menu(self.menubar, tearoff=0)
+        self.lang_menu = tk.Menu(self.settings_menu, tearoff=0)
+        
+        # Clasificar y ordenar los idiomas
+        sorted_languages = []
+        for code, data in self.translations.items():
+            lang_name = data.get("_language", code.upper())
+            sorted_languages.append((lang_name, code))
+        sorted_languages.sort(key=lambda x: x[0])
+
+        for lang_name, code in sorted_languages:
+            flag = self.lang_flags.get(code, "🌐")
+            menu_label = f"{flag} {lang_name}"
+            # Se fija 'code' por default param en lambda para evitar clónicos de closures
+            self.lang_menu.add_command(label=menu_label, command=lambda c=code: self.change_language(c))
+            
+        self.settings_menu.add_cascade(menu=self.lang_menu, label=self.tr("menu_language"))
+        self.menubar.add_cascade(menu=self.settings_menu, label=self.tr("menu_settings"))
+        
+        self.root.config(menu=self.menubar)
+
+    def actualizar_idioma_ui(self):
+        """Regenera y traduce de forma dinámica absolutamente todos los controles y etiquetas de la GUI."""
+        # Comprobación de seguridad para evitar llamadas prematuras al cambiar idioma
+        if not hasattr(self, 'panel_encoder_frame') or not hasattr(self, 'panel_decoder_frame'):
+            return
+
+        self.root.title(self.tr("app_title"))
+        
+        # 1. Marcos principales (LabelFrames)
+        self.panel_encoder_frame.config(text=self.tr("encoder_title"))
+        self.panel_decoder_frame.config(text=self.tr("decoder_title"))
+        self.panel_diagnosticos_frame.config(text=self.tr("diag_title"))
+        
+        # 2. Etiquetas de sliders y campos fijos
+        if hasattr(self, 'lbl_poles_title'): self.lbl_poles_title.config(text=self.tr("lbl_poles"))
+        if hasattr(self, 'lbl_gain_title'): self.lbl_gain_title.config(text=self.tr("lbl_gain"))
+        if hasattr(self, 'lbl_stereo_title'): self.lbl_stereo_title.config(text=self.tr("lbl_stereo"))
+        if hasattr(self, 'lbl_smooth_title'): self.lbl_smooth_title.config(text=self.tr("lbl_smooth"))
+        if hasattr(self, 'lbl_vis_selector'): self.lbl_vis_selector.config(text=self.tr("lbl_vis_selector"))
+        if hasattr(self, 'lbl_sys_stats_title'): self.lbl_sys_stats_title.config(text=self.tr("lbl_sys_stats"))
+        
+        # 3. Botones y selectores
+        if hasattr(self, 'btn_load_multimedia'): self.btn_load_multimedia.config(text=self.tr("btn_load_pcm"))
+        if hasattr(self, 'btn_save_chtn_dest'): self.btn_save_chtn_dest.config(text=self.tr("btn_save_chtn"))
+        if hasattr(self, 'btn_convertir'): self.btn_convertir.config(text=self.tr("btn_convert"))
+        if hasattr(self, 'btn_cargar'): self.btn_cargar.config(text=self.tr("btn_load_chtn"))
+        if hasattr(self, 'btn_play'): self.btn_play.config(text=self.tr("btn_play"))
+        if hasattr(self, 'btn_stop'): self.btn_stop.config(text=self.tr("btn_stop"))
+        
+        # 4. Checkboxes
+        if hasattr(self, 'chk_autoload'): self.chk_autoload.config(text=self.tr("chk_autoload"))
+        if hasattr(self, 'chk_vis'): self.chk_vis.config(text=self.tr("chk_vis"))
+        if hasattr(self, 'chk_debug'): self.chk_debug.config(text=self.tr("chk_debug"))
+        
+        # 5. Reconstrucción segura de menús (API limpia)
+        self._crear_menus()
+
+        # 6. Mapeo y traducción del combobox de visualizadores
+        if hasattr(self, 'combo_vis'):
+            vis_traducidos = []
+            for key_vis, default_val in self.visualizadores_mapping:
+                vis_traducidos.append(self.tr(key_vis))
+                
+            current_idx = self.combo_vis.current()
+            self.combo_vis['values'] = vis_traducidos
+            
+            if current_idx >= 0:
+                self.combo_vis.current(current_idx)
+            else:
+                self.combo_vis.current(0)
+            
+        # 7. Actualización de StringVars reactivas
+        placeholders_mp3 = ["Ningún archivo seleccionado", "No file selected", self.translations.get("en", {}).get("no_file_selected"), self.translations.get("es", {}).get("no_file_selected")]
+        if self.selected_mp3_path.get() in placeholders_mp3 or self.selected_mp3_path.get() == "":
+            self.selected_mp3_path.set(self.tr("no_file_selected"))
+            
+        placeholders_chtn = ["Ningún destino .chtn elegido", "No destination .chtn chosen", self.translations.get("en", {}).get("no_dest_selected"), self.translations.get("es", {}).get("no_dest_selected")]
+        if self.output_chtn_path.get() in placeholders_chtn or self.output_chtn_path.get() == "":
+            self.output_chtn_path.set(self.tr("no_dest_selected"))
+            
+        placeholders_loaded = ["Ningún contenedor cargado", "No container loaded", self.translations.get("en", {}).get("no_container_loaded"), self.translations.get("es", {}).get("no_container_loaded")]
+        if self.loaded_chtn_path.get() in placeholders_loaded or self.loaded_chtn_path.get() == "":
+            self.loaded_chtn_path.set(self.tr("no_container_loaded"))
+            
+        self._actualizar_info_canales_encoder()
+        self._calcular_reloj_tiempos(self.frame_actual)
+        
+        # 9. Estado inicial estático si no está reproduciendo
+        if not self.reproduciendo:
+            self.display_stats.config(state="normal")
+            self.display_stats.delete("1.0", tk.END)
+            self.display_stats.insert("1.0", self.tr("stats_wait_play"))
+            self.display_stats.config(state="disabled")
+
+        # Cambiar el título del LabelFrame del visualizador dinámicamente según el modo seleccionado
+        if hasattr(self, 'combo_vis'):
+            modo_actual = self.visualizer_mode_var.get()
+            self.frame_visual.config(text=" " + modo_actual.upper() + " ")
 
     def _inicializar_bancos_ruido(self):
         """Genera bancos de ruido filtrados por banda perfectos mediante IFFT para máximo realismo percusivo."""
@@ -289,6 +691,7 @@ class ChtnStudioApp:
 
     def _crear_ui(self):
         self.root.configure(bg=self.bg_back)
+        
         main_container = ttk.Frame(self.root, padding=8)
         main_container.pack(fill="both", expand=True)
         main_container.columnconfigure(0, weight=3)
@@ -300,68 +703,56 @@ class ChtnStudioApp:
         left_side.columnconfigure(0, weight=1)
         left_side.rowconfigure(2, weight=1) 
 
-        self._crear_panel_encoder(left_side)
-        self._crear_panel_decoder(left_side)
+        # Panel de Conversión (Encoder)
+        self.panel_encoder_frame = ttk.LabelFrame(left_side, text="")
+        self.panel_encoder_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.panel_encoder_frame.columnconfigure(1, weight=1)
 
-        self.frame_visual = ttk.LabelFrame(left_side, text=" MONITOR DE ANÁLISIS ESPECTRAL Y COHERENCIA VECTORIAL ")
-        self.frame_visual.grid(row=2, column=0, sticky="nsew", pady=4)
-        self.frame_visual.columnconfigure(0, weight=1)
-        self.frame_visual.rowconfigure(0, weight=1)
-        
-        self.canvas = tk.Canvas(self.frame_visual, height=220, bg=self.bg_disp, highlightthickness=1, highlightbackground="#555")
-        self.canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.btn_load_multimedia = ttk.Button(self.panel_encoder_frame, text="", command=self.seleccionar_mp3)
+        self.btn_load_multimedia.grid(row=0, column=0, padx=8, pady=4, sticky="ew")
+        lbl_sel = ttk.Label(self.panel_encoder_frame, textvariable=self.selected_mp3_path, background=self.bg_disp, foreground=self.fg_amber, relief="sunken", anchor="w", padding=4)
+        lbl_sel.grid(row=0, column=1, padx=8, pady=4, sticky="ew")
 
-        right_side = ttk.Frame(main_container)
-        right_side.grid(row=0, column=1, sticky="nsew")
-        self._crear_panel_diagnosticos(right_side)
+        self.btn_save_chtn_dest = ttk.Button(self.panel_encoder_frame, text="", command=self.seleccionar_salida)
+        self.btn_save_chtn_dest.grid(row=1, column=0, padx=8, pady=4, sticky="ew")
+        lbl_out = ttk.Label(self.panel_encoder_frame, textvariable=self.output_chtn_path, background=self.bg_disp, foreground=self.fg_amber, relief="sunken", anchor="w", padding=4)
+        lbl_out.grid(row=1, column=1, padx=8, pady=4, sticky="ew")
 
-        status_frame = ttk.Frame(main_container)
-        status_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        self.lbl_estado = ttk.Label(status_frame, text="Listo.", relief="sunken", anchor="w", background=self.bg_panel, padding=4)
-        self.lbl_estado.pack(fill="x")
-
-    def _crear_panel_encoder(self, padre):
-        frame = ttk.LabelFrame(padre, text=" UNIDAD DE MASTERING Y ENCODER (TRACKING SINUSOIDAL) ")
-        frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        frame.columnconfigure(1, weight=1)
-
-        ttk.Button(frame, text="1. Cargar Pista (Audio o Vídeo)", command=self.seleccionar_mp3).grid(row=0, column=0, padx=8, pady=4, sticky="ew")
-        ttk.Label(frame, textvariable=self.selected_mp3_path, background=self.bg_disp, foreground=self.fg_amber, relief="sunken", anchor="w", padding=4).grid(row=0, column=1, padx=8, pady=4, sticky="ew")
-        ttk.Button(frame, text="2. Destino .CHTN", command=self.seleccionar_salida).grid(row=1, column=0, padx=8, pady=4, sticky="ew")
-        ttk.Label(frame, textvariable=self.output_chtn_path, background=self.bg_disp, foreground=self.fg_amber, relief="sunken", anchor="w", padding=4).grid(row=1, column=1, padx=8, pady=4, sticky="ew")
-
-        scale_frame = ttk.Frame(frame)
+        scale_frame = ttk.Frame(self.panel_encoder_frame)
         scale_frame.grid(row=2, column=0, columnspan=2, padx=8, pady=6, sticky="ew")
         scale_frame.columnconfigure(1, weight=1)
-        ttk.Label(scale_frame, text="Osciladores Totales:", font=("Consolas", 9, "bold")).grid(row=0, column=0, padx=(0, 8))
+        self.lbl_poles_title = ttk.Label(scale_frame, text="", font=("Consolas", 9, "bold"))
+        self.lbl_poles_title.grid(row=0, column=0, padx=(0, 8))
         self.slider_canales = tk.Scale(scale_frame, from_=32, to=1024, orient="horizontal", showvalue=True, variable=self.num_canales_slider_var, highlightthickness=0, bg=self.bg_panel, fg="#0000aa")
         self.slider_canales.grid(row=0, column=1, sticky="ew")
         self.num_canales_slider_var.trace_add("write", self._actualizar_info_canales_encoder)
 
-        self.lbl_resolucion = ttk.Label(frame, text="", font=("Consolas", 8, "italic"), foreground="#0000aa")
+        self.lbl_resolucion = ttk.Label(self.panel_encoder_frame, text="", font=("Consolas", 8, "italic"), foreground="#0000aa")
         self.lbl_resolucion.grid(row=3, column=0, columnspan=2, padx=10, pady=(0, 4), sticky="w")
 
-        opcs = ttk.Frame(frame)
+        opcs = ttk.Frame(self.panel_encoder_frame)
         opcs.grid(row=4, column=0, columnspan=2, padx=8, pady=4, sticky="ew")
         opcs.columnconfigure(1, weight=1)
-        ttk.Checkbutton(opcs, text="Auto-cargar", variable=self.auto_load_after_convert).grid(row=0, column=0, sticky="w")
+        self.chk_autoload = ttk.Checkbutton(opcs, text="", variable=self.auto_load_after_convert)
+        self.chk_autoload.grid(row=0, column=0, sticky="w")
         ttk.Progressbar(opcs, variable=self.progress_var, maximum=100).grid(row=0, column=1, padx=(12, 0), sticky="ew")
 
-        self.btn_convertir = ttk.Button(frame, text="Compilar CHTN v31 (Mu-law + Zero-Padding)", command=self.convertir_mp3, state="disabled")
+        self.btn_convertir = ttk.Button(self.panel_encoder_frame, text="", command=self.convertir_mp3, state="disabled")
         self.btn_convertir.grid(row=5, column=0, columnspan=2, padx=8, pady=6, sticky="ew")
 
-    def _crear_panel_decoder(self, padre):
-        frame = ttk.LabelFrame(padre, text=" MOTOR DE SÍNTESIS ADITIVA (DAW MULTIHILO) ")
-        frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        frame.columnconfigure(0, weight=1)
+        # Panel de Reproducción (Decoder / Synth)
+        self.panel_decoder_frame = ttk.LabelFrame(left_side, text="")
+        self.panel_decoder_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        self.panel_decoder_frame.columnconfigure(0, weight=1)
 
-        t_info = ttk.Frame(frame)
+        t_info = ttk.Frame(self.panel_decoder_frame)
         t_info.grid(row=0, column=0, padx=8, pady=(4, 2), sticky="ew")
         t_info.columnconfigure(0, weight=1)
         ttk.Label(t_info, textvariable=self.loaded_chtn_path, font=("Consolas", 10, "bold"), foreground="#0000aa").grid(row=0, column=0, sticky="w")
-        ttk.Label(t_info, textvariable=self.tiempo_total_lbl, font=("Consolas", 9, "italic")).grid(row=0, column=1, sticky="e")
+        self.lbl_duracion_total = ttk.Label(t_info, textvariable=self.tiempo_total_lbl, font=("Consolas", 9, "italic"))
+        self.lbl_duracion_total.grid(row=0, column=1, sticky="e")
 
-        tl_frame = ttk.Frame(frame)
+        tl_frame = ttk.Frame(self.panel_decoder_frame)
         tl_frame.grid(row=1, column=0, padx=8, pady=2, sticky="ew")
         tl_frame.columnconfigure(1, weight=1)
         self.lbl_transcurrido = ttk.Label(tl_frame, textvariable=self.tiempo_transcurrido_lbl, font=("Consolas", 10, "bold"), width=6, anchor="center", background=self.bg_disp, foreground=self.fg_green, relief="sunken")
@@ -373,65 +764,74 @@ class ChtnStudioApp:
         self.lbl_restante = ttk.Label(tl_frame, textvariable=self.tiempo_restante_lbl, font=("Consolas", 10, "bold"), width=7, anchor="center", background=self.bg_disp, foreground=self.fg_amber, relief="sunken")
         self.lbl_restante.grid(row=0, column=2, padx=(6, 0))
 
-        ctrls = ttk.Frame(frame)
+        ctrls = ttk.Frame(self.panel_decoder_frame)
         ctrls.grid(row=2, column=0, padx=8, pady=4, sticky="ew")
         ctrls.columnconfigure(1, weight=1); ctrls.columnconfigure(3, weight=1)
-        ttk.Label(ctrls, text="Ganancia:", font=("Consolas", 9, "bold")).grid(row=0, column=0, padx=(0, 4))
+        self.lbl_gain_title = ttk.Label(ctrls, text="", font=("Consolas", 9, "bold"))
+        self.lbl_gain_title.grid(row=0, column=0, padx=(0, 4))
         self.slider_master_vol = ttk.Scale(ctrls, from_=0.0, to=4.0, orient="horizontal", variable=self.master_tonal_gain_var)
         self.slider_master_vol.grid(row=0, column=1, padx=(0, 15), sticky="ew")
-        ttk.Label(ctrls, text="Ancho Estéreo:", font=("Consolas", 9, "bold")).grid(row=0, column=2, padx=(0, 4))
+        self.lbl_stereo_title = ttk.Label(ctrls, text="", font=("Consolas", 9, "bold"))
+        self.lbl_stereo_title.grid(row=0, column=2, padx=(0, 4))
         self.slider_stereo = ttk.Scale(ctrls, from_=0.0, to=2.0, orient="horizontal", variable=self.stereo_width_var)
         self.slider_stereo.grid(row=0, column=3, padx=(0, 15), sticky="ew")
 
-        btns = ttk.Frame(frame)
-        btns.grid(row=3, column=0, padx=8, pady=(4, 6), sticky="ew")
-        self.btn_cargar = ttk.Button(btns, text="Abrir .CHTN", command=self.cargar_chtn)
+        dsp_controls2 = ttk.Frame(self.panel_decoder_frame)
+        dsp_controls2.grid(row=3, column=0, padx=8, pady=4, sticky="ew")
+        dsp_controls2.columnconfigure(1, weight=1); dsp_controls2.columnconfigure(3, weight=1)
+        self.lbl_smooth_title = ttk.Label(dsp_controls2, text="", font=("Consolas", 9, "bold"))
+        self.lbl_smooth_title.grid(row=0, column=0, padx=(0, 4))
+        self.slider_smooth = ttk.Scale(dsp_controls2, from_=0.1, to=0.95, orient="horizontal", variable=self.temporal_smooth_var)
+        self.slider_smooth.grid(row=0, column=1, padx=(0, 15), sticky="ew")
+
+        btns = ttk.Frame(self.panel_decoder_frame)
+        btns.grid(row=4, column=0, padx=8, pady=(4, 6), sticky="ew")
+        self.btn_cargar = ttk.Button(btns, text="", command=self.cargar_chtn)
         self.btn_cargar.grid(row=0, column=0, padx=(0, 4))
-        self.btn_play = ttk.Button(btns, text="PLAY ⏸", command=self.iniciar_audio, state="disabled")
+        self.btn_play = ttk.Button(btns, text="", command=self.iniciar_audio, state="disabled")
         self.btn_play.grid(row=0, column=1, padx=4)
-        self.btn_stop = ttk.Button(btns, text="STOP 🛑", command=self.detener_audio, state="disabled")
+        self.btn_stop = ttk.Button(btns, text="", command=self.detener_audio, state="disabled")
         self.btn_stop.grid(row=0, column=2, padx=4)
 
-    def _crear_panel_diagnosticos(self, padre):
-        frame = ttk.LabelFrame(padre, text=" PANEL DE DIAGNÓSTICO ")
-        frame.pack(fill="both", expand=True)
-
-        ttk.Label(frame, text="Instrumento de Medición:", font=("Consolas", 9, "bold")).pack(anchor="w", padx=8, pady=(8, 2))
+        # Panel de Visualizador Espectral (Centro)
+        self.frame_visual = ttk.LabelFrame(left_side, text="")
+        self.frame_visual.grid(row=2, column=0, sticky="nsew", pady=4)
+        self.frame_visual.columnconfigure(0, weight=1)
+        self.frame_visual.rowconfigure(0, weight=1)
         
-        visualizadores = [
-            "Analizador FFT Logarítmico",
-            "Espectrómetro de Barras (FFT)",
-            "Sonograma 2D (Espectrograma)",
-            "Cascada Espectral 3D",
-            "Monitor Vectorial (Lissajous)",
-            "Goniometro de Correlación",
-            "Osciloscopio Dual L/R",
-            "Multi-Osciloscopio (Scroll)",
-            "Vúmetro Analógico (VU Meter)",
-            "Medidor RMS / Peak Digital",
-            "Escala Psicoacústica Bark",
-            "Actividad de Osciladores"
-        ]
-        self.combo_vis = ttk.Combobox(frame, textvariable=self.visualizer_mode_var, values=visualizadores, state="readonly")
+        self.canvas = tk.Canvas(self.frame_visual, height=220, bg=self.bg_disp, highlightthickness=1, highlightbackground="#555")
+        self.canvas.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+
+        right_side = ttk.Frame(main_container)
+        right_side.grid(row=0, column=1, sticky="nsew")
+        
+        # Panel de Diagnósticos (Derecha)
+        self.panel_diagnosticos_frame = ttk.LabelFrame(right_side, text="")
+        self.panel_diagnosticos_frame.pack(fill="both", expand=True)
+
+        self.lbl_vis_selector = ttk.Label(self.panel_diagnosticos_frame, text="", font=("Consolas", 9, "bold"))
+        self.lbl_vis_selector.pack(anchor="w", padx=8, pady=(8, 2))
+        self.combo_vis = ttk.Combobox(self.panel_diagnosticos_frame, textvariable=self.visualizer_mode_var, values=[], state="readonly")
         self.combo_vis.pack(fill="x", padx=8, pady=2)
-        self.combo_vis.bind("<<ComboboxSelected>>", lambda e: self.canvas.configure(scrollregion=(0,0,0,0)))
+        self.combo_vis.bind("<<ComboboxSelected>>", self._on_visualizer_selected_change)
 
-        ttk.Checkbutton(frame, text="Habilitar Visualizador", variable=self.visualizer_enabled, command=self._toggle_visualizador).pack(anchor="w", padx=8, pady=2)
-        ttk.Checkbutton(frame, text="Imprimir Trace en Consola", variable=self.dsp_debug_enabled).pack(anchor="w", padx=8, pady=2)
+        self.chk_vis = ttk.Checkbutton(self.panel_diagnosticos_frame, text="", variable=self.visualizer_enabled, command=self._toggle_visualizador)
+        self.chk_vis.pack(anchor="w", padx=8, pady=2)
+        self.chk_debug = ttk.Checkbutton(self.panel_diagnosticos_frame, text="", variable=self.dsp_debug_enabled)
+        self.chk_debug.pack(anchor="w", padx=8, pady=2)
 
-        lbl_title = ttk.Label(frame, text="TELEMETRÍA DEL SISTEMA:", font=("Consolas", 9, "bold"), foreground="#0000aa")
-        lbl_title.pack(anchor="w", padx=8, pady=(12, 4))
+        self.lbl_sys_stats_title = ttk.Label(self.panel_diagnosticos_frame, text="", font=("Consolas", 9, "bold"), foreground="#0000aa")
+        self.lbl_sys_stats_title.pack(anchor="w", padx=8, pady=(12, 4))
 
-        self.display_stats = tk.Text(frame, bg=self.bg_disp, fg=self.fg_amber, font=("Consolas", 9), height=18, width=32, relief="sunken", bd=2)
+        self.display_stats = tk.Text(self.panel_diagnosticos_frame, bg=self.bg_disp, fg=self.fg_amber, font=("Consolas", 9), height=18, width=32, relief="sunken", bd=2)
         self.display_stats.pack(fill="both", expand=True, padx=8, pady=4)
-        self.display_stats.insert("1.0", "Esperando flujo de audio...")
+        self.display_stats.insert("1.0", self.tr("stats_wait"))
         self.display_stats.config(state="disabled")
 
     # =========================================================================
     # ACCIONES E INTERFAZ
     # =========================================================================
     def seleccionar_mp3(self):
-        # Filtros de búsqueda extendidos para dar soporte nativo a audio y vídeo universal
         formatos_soportados = [
             ("Flujos Multimedia Soportados", "*.mp3 *.wav *.flac *.ogg *.m4a *.aac *.ac3 *.eac3 *.thd *.dts *.opus *.aiff *.wma *.mp4 *.mkv *.mov *.avi *.webm *.mts *.m2ts *.ts *.mpeg *.mpg"),
             ("Todos los archivos", "*.*")
@@ -469,7 +869,6 @@ class ChtnStudioApp:
                 self.ring_available = 0
                 self.ring_buffer.fill(0.0)
             
-            # Limpiar el buffer de salida (Double-Buffer Queue) para que no reproduzca fragmentos previos
             while not self.audio_queue.empty():
                 try:
                     self.audio_queue.get_nowait()
@@ -479,14 +878,17 @@ class ChtnStudioApp:
             self.user_is_seeking = False
             self._calcular_reloj_tiempos(nf)
 
+    def _on_visualizer_selected_change(self, event):
+        """Callback al cambiar el visualizador desde la lista del Combobox."""
+        self.canvas.configure(scrollregion=(0, 0, 0, 0))
+        modo_actual = self.visualizer_mode_var.get()
+        self.frame_visual.config(text=" " + modo_actual.upper() + " ")
+
     def _actualizar_info_canales_encoder(self, *args):
         try: ch = self.num_canales_slider_var.get()
         except Exception: ch = 256
         t, n = calcular_reparto_canales_dinamico(ch)
-        self.lbl_resolucion.config(text=f"Tracker: {t} armónicos puros + {n} bancos de ruido.")
-
-    def _set_estado(self, txt): self.root.after(0, lambda: self.lbl_estado.config(text=txt))
-    def _set_progreso(self, v): self.root.after(0, lambda: self.progress_var.set(v))
+        self.lbl_resolucion.config(text=self.tr("lbl_res_msg", t=t, n=n))
 
     def _calcular_reloj_tiempos(self, f_pos):
         if self.total_frames_cancion <= 0: return
@@ -494,7 +896,7 @@ class ChtnStudioApp:
         t_act = int(f_pos / self.fps_analisis)
         self.tiempo_transcurrido_lbl.set(f"{t_act//60:02d}:{t_act%60:02d}")
         self.tiempo_restante_lbl.set(f"-{max(0, t_tot-t_act)//60:02d}:{max(0, t_tot-t_act)%60:02d}")
-        self.tiempo_total_lbl.set(f"Duración: {t_tot//60:02d}:{t_tot%60:02d}")
+        self.tiempo_total_lbl.set(self.tr("elapsed_duration", h=t_tot//60, m=t_tot%60))
 
     # =========================================================================
     # ENCODER v31: TRACKING SINUSOIDAL + ZERO PADDING + MU-LAW QUANTIZATION
@@ -510,26 +912,22 @@ class ChtnStudioApp:
         
         def hilo_analisis():
             try:
-                self._set_estado("Abriendo y decodificando flujo mediante FFmpeg...")
+                self._set_estado(self.tr("status_convert_ffmpeg"))
                 
-                # -------------------------------------------------------------
-                # LLAMADA DE DECODIFICACIÓN UNIVERSAL (FFMPEG COHERENTE)
-                # -------------------------------------------------------------
                 try:
                     # Con esta llamada universal ya no nos preocupamos del codec
                     # de entrada (MP3, WAV, FLAC, AC3, MKV, DTS, etc.)
                     # El resultado es un ndarray float32 contiguo mapeado directamente.
                     y, sr = abrir_audio_universal(ruta_mp3, target_sr=SAMPLE_RATE)
                 except RuntimeError as re:
-                    self._set_estado("Falta dependencia crítica.")
-                    self.root.after(0, lambda: messagebox.showerror("FFmpeg Requerido", str(re)))
+                    self._set_estado(self.tr("err_read_title"))
+                    self.root.after(0, lambda: messagebox.showerror(self.tr("err_ffmpeg_title"), str(re)))
                     return
                 except Exception as ex:
-                    self._set_estado("Error al abrir pista universal.")
-                    self.root.after(0, lambda: messagebox.showerror("Error multimedia", f"No se pudo procesar el archivo: {ex}"))
+                    self._set_estado(self.tr("err_read_title"))
+                    self.root.after(0, lambda: messagebox.showerror(self.tr("err_media_title"), self.tr("err_media_msg", ex=ex)))
                     return
 
-                # Si es mono, lo convertimos internamente a pseudo-estéreo
                 if y.ndim == 1:
                     y = np.vstack([y, y])
                 # Si es estéreo o multicanal (5.1 o 7.1), nos quedamos con las dos primeras pistas para síntesis L/R
@@ -537,7 +935,7 @@ class ChtnStudioApp:
                 self.original_wav_size = float(y.nbytes) / (1024.0 * 1024.0)
 
                 self._set_progreso(10)
-                self._set_estado("Ejecutando STFT con Blackman-Harris y Zero-Padding (Extrema Resolución)...")
+                self._set_estado(self.tr("status_convert_stft"))
                 
                 hop_length = 512  
                 win_length = 2048
@@ -566,7 +964,7 @@ class ChtnStudioApp:
                 factores_oido = peso_psicoacustico(freqs_util)
                 umbral_abs = max_stft * 0.0001 
 
-                self._set_estado("Tracking Sinusoidal Activo: Emparejamiento temporal de armónicos...")
+                self._set_estado(self.tr("status_convert_tracking"))
                 
                 active_tracks_f = np.zeros(canales_tonales, dtype=np.float32)
                 active_tracks_v = np.zeros(canales_tonales, dtype=np.float32)
@@ -646,7 +1044,7 @@ class ChtnStudioApp:
 
                     if f_idx % 1000 == 0: self._set_progreso(15 + int(f_idx * 60 / num_frames))
 
-                self._set_estado("Cuantización Mu-Law y Compresión Delta de Eventos...")
+                self._set_estado(self.tr("status_convert_mulaw"))
                 
                 v31_t_f, v31_t_c, v31_t_fr, v31_t_v, v31_t_p = [], [], [], [], []
                 p_f, p_v, p_p = np.zeros(canales_tonales), np.zeros(canales_tonales), np.zeros(canales_tonales)
@@ -681,7 +1079,7 @@ class ChtnStudioApp:
                             p_nv[c_idx] = nvq
 
                 self._set_progreso(95)
-                self._set_estado("Escribiendo contenedor CHTN...")
+                self._set_estado(self.tr("status_convert_write"))
 
                 tmp = tempfile.NamedTemporaryFile("wb", delete=False, dir=os.path.dirname(ruta_salida) or ".", suffix=".tmp")
                 with tmp as f:
@@ -701,10 +1099,11 @@ class ChtnStudioApp:
                 os.replace(tmp.name, ruta_salida)
                 self._set_progreso(100)
                 sz = os.path.getsize(ruta_salida) / 1024.0
-                self._set_estado(f"¡Completado! Peso: {sz:.1f} KB.")
+                self._set_estado(self.tr("convert_done_msg", sz=sz))
+                self.root.after(0, lambda: messagebox.showinfo(self.tr("convert_success_title"), self.tr("convert_success_msg", sz=sz)))
                 if self.auto_load_after_convert.get(): self.root.after(0, lambda: self.cargar_chtn_desde_ruta(ruta_salida))
             except Exception as e:
-                self._set_estado(f"Error: {e}"); messagebox.showerror("Error", str(e))
+                self._set_estado(self.tr("err_read_title")); messagebox.showerror(self.tr("err_media_title"), str(e))
             finally:
                 self.root.after(0, self._actualizar_acciones)
         threading.Thread(target=hilo_analisis, daemon=True).start()
@@ -824,7 +1223,7 @@ class ChtnStudioApp:
                 self.bin_tonal_freqs, self.bin_tonal_vols, self.bin_tonal_pans, self.bin_noise_vols = bf, bv, bp, bn
 
         except Exception as e:
-            messagebox.showerror("Error de lectura", str(e)); return
+            messagebox.showerror(self.tr("err_read_title"), str(e)); return
 
         with self.v_lock:
             self.phases.fill(0.0)
@@ -856,33 +1255,30 @@ class ChtnStudioApp:
             audio_elapsed = self.samples_played / self.sample_rate_efectivo
             time_error = real_elapsed - audio_elapsed
 
+        reduction_percentage = 0.0
+        if self.original_wav_size > 0:
+            reduction_percentage = (1.0 - (file_size_kb / (self.original_wav_size * 1024.0))) * 100.0
+
         info = [
-            "CHTN DECODER ENGINE v31",
+            self.tr("stat_engine"),
             "-"*24,
-            f"Format Version : {self.detected_version}",
-            f"WAV SampleRate : {self.sample_rate_archivo} Hz",
-            f"Tonal Channels : {self.canales_tonales_actual}",
-            f"Noise Channels : {self.canales_ruido_actual}",
-            f"CHTN File Size : {file_size_kb:.2f} KB",
+            self.tr("stat_version", ver=self.detected_version),
+            self.tr("stat_sr", sr=self.sample_rate_archivo),
+            self.tr("stat_tonal", ton=self.canales_tonales_actual),
+            self.tr("stat_noise", noi=self.canales_ruido_actual),
+            self.tr("stat_file_sz", sz=file_size_kb),
+            self.tr("stat_reduction", red=reduction_percentage),
             "-"*24,
-            "DIAGNOSTICOS DE TIEMPO:",
-            f" SR Solicitado  : {self.sample_rate_archivo} Hz",
-            f" SR Efectivo    : {self.sample_rate_efectivo:.1f} Hz",
-            f" Bloque Esperado: {BLOCK_SIZE} muestras",
-            f" Bloque Real    : {BLOCK_SIZE} muestras",
-            f" Duración Esperada: {(BLOCK_SIZE / self.sample_rate_archivo)*1000.0:.2f} ms",
-            f" Duración Real  : {self.block_render_ms:.2f} ms",
-            f" Err Acumulado  : {time_error:+.4f} s",
+            self.tr("stat_active_rt", oscs=self.active_oscs_realtime),
+            self.tr("stat_dsp_load", load=self.cpu_usage_pct),
+            self.tr("stat_dsp_fps", fps=self.dsp_fps),
+            self.tr("stat_block_ms", ms=self.block_render_ms),
             "-"*24,
-            f"Active Oscs RT : {self.active_oscs_realtime}",
-            f"DSP Thread Load: {self.cpu_usage_pct:.1f} %",
-            f"DSP Frame Rate : {self.dsp_fps:.1f} FPS",
-            "-"*24,
-            "DSP STAGE PROFILE (ms):",
-            f" - Prep Frame  : {self.prof_prep:.3f}",
-            f" - Additive Syn: {self.prof_synth:.3f}",
-            f" - Mix & Limit : {self.prof_mix:.3f}",
-            f" - Visual Data : {self.prof_vis:.3f}",
+            self.tr("stat_stage_title"),
+            self.tr("stat_stage_prep", val=self.prof_prep),
+            self.tr("stat_stage_syn", val=self.prof_synth),
+            self.tr("stat_stage_mix", val=self.prof_mix),
+            self.tr("stat_stage_vis", val=self.prof_vis),
         ]
         self.display_stats.insert("1.0", "\n".join(info))
         self.display_stats.config(state="disabled")
@@ -1044,6 +1440,15 @@ class ChtnStudioApp:
                 self.ring_available -= frames
                 self.samples_played += frames
             
+            # Actualización del visualizador síncrono
+            if self.visualizer_enabled.get() and self.samples_played % (BLOCK_SIZE * 4) == 0:
+                with self.visual_lock:
+                    fs_ratio = float(self.sample_rate_archivo) if self.sample_rate_archivo > 0 else SAMPLE_RATE
+                    idx_played = int((self.samples_played / fs_ratio) * self.fps_analisis)
+                    if idx_played < self.total_frames_cancion:
+                        self.visual_instant_vols[:self.canales_tonales_actual] = self.bin_tonal_vols[idx_played]
+                        self.visual_instant_freqs[:self.canales_tonales_actual] = self.bin_tonal_freqs[idx_played]
+            
         except Exception:
             outdata.fill(0)
 
@@ -1078,14 +1483,14 @@ class ChtnStudioApp:
         self.dsp_thread.start()
         
         self.btn_play.config(state="disabled"); self.btn_stop.config(state="normal")
-        self._set_estado("Motor DSP DAW activo y reproduciendo.")
+        self._set_estado(self.tr("status_play_daw"))
 
     def detener_audio(self):
         self.reproduciendo = False
         if self.stream: self.stream.stop(); self.stream.close(); self.stream = None
         if self.dsp_thread: self.dsp_thread.join(timeout=1.0); self.dsp_thread = None
         self.btn_play.config(state="normal" if self.bin_tonal_freqs is not None else "disabled"); self.btn_stop.config(state="disabled")
-        self._set_estado("Motor DSP detenido.")
+        self._set_estado(self.tr("status_play_stop"))
 
     def _reset_visual_buffers(self):
         self.visual_buffer_l.fill(0.0); self.visual_buffer_r.fill(0.0)
@@ -1103,7 +1508,14 @@ class ChtnStudioApp:
     def _dibujar_visualizador(self):
         if not self.visualizer_enabled.get(): return
         ancho, alto = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
-        modo = self.visualizer_mode_var.get()
+        modo_actual = self.visualizer_mode_var.get()
+        
+        # Mapear el nombre traducido del Combobox de vuelta a su Key inmutable de visualizador
+        modo_key = "vis_fft_log"
+        for key, default_translation in self.visualizadores_mapping:
+            if self.tr(key) == modo_actual or default_translation == modo_actual:
+                modo_key = key
+                break
         
         # Actualización de barra de reproducción en base al reloj de muestras reproducidas (DAC)
         if self.reproduciendo and self.total_frames_cancion > 0 and not self.user_is_seeking:
@@ -1119,7 +1531,7 @@ class ChtnStudioApp:
             
         self.canvas.delete("all")
 
-        if modo == "Espectrómetro de Barras (FFT)":
+        if modo_key == "vis_fft_bar":
             n_b = 64; ax = (ancho - 40) / n_b; v_b = np.zeros(n_b, dtype=np.float32)
             for i, f in enumerate(freqs[:self.canales_tonales_actual]):
                 if f > MIN_FREQ and vols[i] > 0:
@@ -1131,7 +1543,7 @@ class ChtnStudioApp:
                 self.canvas.create_rectangle(20+b*ax+1, alto-30-h_b, 20+b*ax+ax-1, alto-30, fill=color, outline="")
             self.canvas.create_line(16, alto-30, ancho-16, alto-30, fill="#555", width=2)
 
-        elif modo == "Analizador FFT Logarítmico":
+        elif modo_key == "vis_fft_log":
             n_b = 128; ax = (ancho - 40) / n_b; v_b = np.zeros(n_b, dtype=np.float32)
             for i, f in enumerate(freqs[:self.canales_tonales_actual]):
                 if f > MIN_FREQ and vols[i] > 0:
@@ -1143,7 +1555,7 @@ class ChtnStudioApp:
             if len(pts) >= 4: self.canvas.create_line(*pts, fill=self.fg_cyan, width=2)
             self.canvas.create_line(16, alto-30, ancho-16, alto-30, fill="#555", width=2)
 
-        elif modo == "Osciloscopio Dual L/R":
+        elif modo_key == "vis_oscilloscope_dual":
             a_o = (alto - 60) / 2.0
             yl, yr = 30 + a_o / 2.0, 30 + a_o * 1.5
             self.canvas.create_text(15, yl, text="L", fill=self.fg_amber); self.canvas.create_text(15, yr, text="R", fill=self.fg_amber)
@@ -1155,7 +1567,7 @@ class ChtnStudioApp:
             if len(pl) >= 4:
                 self.canvas.create_line(*pl, fill=self.fg_green, width=1.5); self.canvas.create_line(*pr, fill=self.fg_cyan, width=1.5)
 
-        elif modo == "Sonograma 2D (Espectrograma)":
+        elif modo_key == "vis_spectrogram":
             if not hasattr(self, 'spec_hist'): self.spec_hist = np.zeros((100, 64), dtype=np.float32)
             nr = np.zeros(64, dtype=np.float32)
             for i, f in enumerate(freqs[:self.canales_tonales_actual]):
@@ -1170,7 +1582,7 @@ class ChtnStudioApp:
                         bx = int(np.clip(self.spec_hist[r, c]*255, 0, 255))
                         self.canvas.create_rectangle(20+c*cw, 30+r*ch, 20+c*cw+cw, 30+r*ch+ch, fill=f"#00{bx:02x}{int(bx*0.8):02x}", outline="")
 
-        elif modo == "Vúmetro Analógico (VU Meter)":
+        elif modo_key == "vis_vu_meter":
             cx, cy, r = ancho/2.0, alto-20, min(ancho, alto)*0.70
             self.canvas.create_arc(cx-r, cy-r, cx+r, cy+r, start=45, extent=90, style="arc", outline=self.fg_text, width=3)
             rms = np.sqrt(np.mean(buf_l**2 + buf_r**2))
@@ -1178,7 +1590,7 @@ class ChtnStudioApp:
             self.canvas.create_line(cx, cy, cx + np.cos(ang)*r*0.9, cy - np.sin(ang)*r*0.9, fill="#ff3333", width=2)
             self.canvas.create_text(cx, cy-30, text="VU METER", fill=self.fg_cyan, font=("Consolas", 10, "bold"))
 
-        elif modo == "Medidor RMS / Peak Digital":
+        elif modo_key == "vis_peak_digital":
             xl, xr, hm = ancho/2.0-50, ancho/2.0+10, alto-100
             pl, pr, rl, rr = np.max(np.abs(buf_l)), np.max(np.abs(buf_r)), np.sqrt(np.mean(buf_l**2)), np.sqrt(np.mean(buf_r**2))
             self.canvas.create_rectangle(xl, 50, xl+40, 50+hm, fill="#111", outline="#555")
@@ -1189,6 +1601,106 @@ class ChtnStudioApp:
             self.canvas.create_line(xr-5, 50+hm - pr*hm, xr+45, 50+hm - pr*hm, fill="#ff3333", width=3)
             self.canvas.create_text(xl+20, alto-35, text="L", fill=self.fg_cyan); self.canvas.create_text(xr+20, alto-35, text="R", fill=self.fg_cyan)
 
+        elif modo_key == "vis_lissajous":
+            cx, cy = ancho / 2.0, alto / 2.0
+            r_pantalla = min(ancho, alto) * 0.40
+            self.canvas.create_oval(cx - r_pantalla, cy - r_pantalla, cx + r_pantalla, cy + r_pantalla, outline="#444", width=1)
+            self.canvas.create_line(cx - r_pantalla, cy, cx + r_pantalla, cy, fill="#333")
+            self.canvas.create_line(cx, cy - r_pantalla, cx, cy + r_pantalla, fill="#333")
+            paso = 4
+            puntos_fase = []
+            for i in range(0, BLOCK_SIZE, paso):
+                val_x = buf_l[i] - buf_r[i]
+                val_y = buf_l[i] + buf_r[i]
+                x = cx + val_x * r_pantalla * 1.5
+                y = cy - val_y * r_pantalla * 1.5
+                puntos_fase.append((x, y))
+            for idx, pt in enumerate(puntos_fase[:-1]):
+                self.canvas.create_line(pt[0], pt[1], puntos_fase[idx+1][0], puntos_fase[idx+1][1], fill=self.fg_cyan, width=1)
+
+        elif modo_key == "vis_correlation":
+            cx, cy = ancho / 2.0, alto / 2.0
+            r = min(ancho, alto) * 0.40
+            self.canvas.create_line(cx - r, cy, cx + r, cy, fill="#444")
+            self.canvas.create_text(cx - r - 20, cy, text="L", fill=self.fg_text)
+            self.canvas.create_text(cx + r + 20, cy, text="R", fill=self.fg_text)
+            num = np.sum(buf_l * buf_r)
+            den = np.sqrt(np.sum(buf_l**2) * np.sum(buf_r**2))
+            correlacion = num / den if den > 1e-6 else 0.0
+            x_corr = cx + correlacion * r
+            self.canvas.create_rectangle(cx, cy - 15, x_corr, cy + 15, fill=self.fg_green, outline="")
+            self.canvas.create_line(cx, cy - 25, cx, cy + 25, fill="#ff3333", width=2)
+            self.canvas.create_text(cx, cy - 40, text=f"Fase: {correlacion:+.2f}", fill=self.fg_cyan, font=("Consolas", 10, "bold"))
+
+        elif modo_key == "vis_waterfall":
+            current_fft = np.zeros(32, dtype=np.float32)
+            for idx, f in enumerate(freqs[:self.canales_tonales_actual]):
+                if f > MIN_FREQ and vols[idx] > 0:
+                    idx_b = int(np.clip((safe_log10(f)-safe_log10(MIN_FREQ))/(safe_log10(MAX_FREQ)-safe_log10(MIN_FREQ))*32, 0, 31))
+                    current_fft[idx_b] = max(current_fft[idx_b], vols[idx])
+            self.visual_waterfall_history.append(current_fft)
+            if len(self.visual_waterfall_history) > 20:
+                self.visual_waterfall_history.pop(0)
+            for step, fft_data in enumerate(self.visual_waterfall_history):
+                points = []
+                offset_x = (20 - step) * 2
+                offset_y = step * 10
+                for b in range(32):
+                    val = fft_data[b]
+                    x = offset_x + b * (ancho - 100) / 32.0
+                    y = alto - 50 - offset_y - (val * 80.0)
+                    points.extend((x, y))
+                if len(points) >= 4:
+                    color_val = int(step * 12)
+                    self.canvas.create_line(*points, fill=f"#{color_val:02x}ff{color_val:02x}", width=1)
+
+        elif modo_key == "vis_activity":
+            col = 32
+            fils = max(1, int(np.ceil(self.total_canales_actual / col)))
+            cell_w = (ancho - 40) / col
+            cell_h = (alto - 50) / fils
+            for idx in range(min(len(vols), self.total_canales_actual)):
+                f_idx = idx // col
+                c_idx = idx % col
+                v = vols[idx]
+                color = self.fg_green if v > 0.01 else "#222"
+                x0 = 20 + c_idx * cell_w + 1
+                y0 = 25 + f_idx * cell_h + 1
+                self.canvas.create_rectangle(x0, y0, x0 + cell_w - 2, y0 + cell_h - 2, fill=color, outline="")
+
+        elif modo_key == "vis_bark":
+            num_bandas_bark = 24  
+            ancho_banda = (ancho - 40) / num_bandas_bark
+            energia_barks = np.zeros(num_bandas_bark, dtype=np.float32)
+            for idx, f in enumerate(freqs[:self.canales_tonales_actual]):
+                if f > MIN_FREQ and vols[idx] > 0:
+                    bk = escala_bark(f)
+                    idx_bk = int(np.clip(bk, 0, num_bandas_bark - 1))
+                    energia_barks[idx_bk] = max(energia_barks[idx_bk], vols[idx])
+            for b in range(num_bandas_bark):
+                h_b = min(alto - 50, energia_barks[b] * (alto - 70) * 2.3)
+                x0 = 20 + b * ancho_banda + 2
+                self.canvas.create_rectangle(x0, alto - 30 - h_b, x0 + ancho_banda - 2, alto - 30, fill=self.fg_amber, outline="")
+            self.canvas.create_line(16, alto-30, ancho-16, alto-30, fill="#555", width=2)
+
+        elif modo_key == "vis_oscilloscope_scroll":
+            canales_visibles = min(16, self.total_canales_actual)
+            alto_pista = (alto - 40) / canales_visibles
+            margen_izq = 90
+            for ch_idx in range(canales_visibles):
+                y_centro = 20 + ch_idx * alto_pista + (alto_pista / 2)
+                hz = freqs[ch_idx]
+                etiqueta = f"OSC_{ch_idx+1:03d}\n{int(hz)}Hz"
+                self.canvas.create_rectangle(2, 20 + ch_idx * alto_pista, ancho - 4, 20 + (ch_idx + 1) * alto_pista, fill="#161a1e", outline="#333")
+                self.canvas.create_text(10, y_centro, text=etiqueta, anchor="w", fill=self.fg_amber, font=("Consolas", 7, "bold"))
+                v_comp = vols[ch_idx]
+                pts = []
+                for i in range(0, 100, 5):
+                    x = margen_izq + i * (ancho - margen_izq - 20) / 100.0
+                    y = y_centro - np.sin(i * 0.4) * v_comp * (alto_pista * 0.4)
+                    pts.extend((x, y))
+                if len(pts) >= 4 and v_comp > 0.01:
+                    self.canvas.create_line(*pts, fill=self.fg_green, width=1)
+
 if __name__ == "__main__":
-    r = tk.Tk(); app = ChtnStudioApp(r); r.mainloop()
     r = tk.Tk(); app = ChtnStudioApp(r); r.mainloop()

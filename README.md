@@ -1,6 +1,8 @@
 # CHTN (Capybla Harmonic Transmission)
 
 > **Experimental parametric audio format based on real-time additive synthesis.**
+> [!NOTE]
+> CHTN is an experimental research project. The format, container structure and DSP engine may change between versions while the project evolves.
 
 🌍 **Languages**
 

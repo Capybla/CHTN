@@ -1,4 +1,4 @@
-# CHTN (Capybla Harmonic Transmission)
+# CHTN (ChipTune)
 
 > **Formato de audio paramétrico experimental basado en síntesis aditiva en tiempo real.**
 

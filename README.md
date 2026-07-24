@@ -17,7 +17,7 @@
 
 ## Overview
 
-CHTN (**Capybla Harmonic Transmission**) is an experimental audio format based on **real-time additive synthesis**.
+CHTN (**ChipTune**) is an experimental audio format based on **real-time additive synthesis**.
 
 Unlike traditional codecs such as MP3, AAC or FLAC, CHTN does not primarily store compressed audio samples. Instead, it stores a compact **parametric description** of the sound that is reconstructed during playback by a lightweight DSP engine.
 
@@ -114,7 +114,7 @@ The objective of this project is **not to replace existing codecs**, but to expl
 
 ## Compression
 
-CHTN does **not** use a fixed bitrate.
+CHTN does **NOT** use a fixed bitrate.
 
 File size depends on the spectral complexity of the source material.
 
